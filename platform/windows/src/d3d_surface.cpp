@@ -55,6 +55,14 @@ public:
     textures_ = std::move(textures);
     Renderer::SetConstantSettings(1, device_->device.Get());
     model_.CreateRenderer(1, 1);
+    auto* shaders = cubism::Rendering::CubismDeviceInfo_D3D11::GetDeviceInfo(device_->device.Get())->GetShader();
+    for (cubism::csmUint32 index = 0; index < cubism::ShaderNames_Max; ++index) {
+      if (!shaders->GetVertexShader(index) || !shaders->GetPixelShader(index)) {
+        model_.DeleteRenderer();
+        if (device_.use_count() == 1) cubism::Rendering::CubismDeviceInfo_D3D11::ReleaseAllDeviceInfo();
+        throw std::runtime_error("Cannot initialize Cubism D3D11 shaders");
+      }
+    }
     auto* renderer = model_.GetRenderer<Renderer>();
     renderer->IsPremultipliedAlpha(false);
     for (std::size_t index = 0; index < textures_.size(); ++index) renderer->BindTexture(index, textures_[index].Get());

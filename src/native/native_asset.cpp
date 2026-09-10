@@ -10,8 +10,8 @@
 #include <set>
 #include <stdexcept>
 
-#if defined(LIVE2D_EMBEDDED_GL_SHADERS)
-#include "gl_shaders.h"
+#if defined(LIVE2D_EMBEDDED_SHADERS)
+#include "embedded_shaders.h"
 #endif
 
 namespace huxerui::live2d::detail {
@@ -41,10 +41,10 @@ public:
   }
 };
 
-#if defined(LIVE2D_EMBEDDED_GL_SHADERS)
+#if defined(LIVE2D_EMBEDDED_SHADERS)
 cubism::csmByte* LoadShader(const std::string path, cubism::csmSizeInt* size) {
   *size = 0;
-  for (const auto& shader : embedded_gl_shaders) {
+  for (const auto& shader : embedded_shaders) {
     if (shader.path != path) continue;
     auto* bytes = static_cast<cubism::csmByte*>(std::malloc(shader.source.size()));
     if (!bytes) return nullptr;
@@ -63,7 +63,7 @@ public:
   Runtime() {
     if (cubism::CubismFramework::IsStarted()) throw std::logic_error("Another Cubism provider is already initialized");
     options_.LoggingLevel = cubism::CubismFramework::Option::LogLevel_Off;
-#if defined(LIVE2D_EMBEDDED_GL_SHADERS)
+#if defined(LIVE2D_EMBEDDED_SHADERS)
     options_.LoadFileFunction = LoadShader;
     options_.ReleaseBytesFunction = ReleaseShader;
 #endif

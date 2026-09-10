@@ -97,8 +97,8 @@ endif ()
 target_link_libraries(huxerui_live2d PRIVATE Framework)
 target_include_directories(huxerui_live2d PRIVATE "${LIVE2D_CUBISM_NATIVE_ROOT}/Samples/OpenGL/thirdParty/stb")
 
-if (FRAMEWORK_SOURCE STREQUAL "OpenGL")
-    include("${CMAKE_CURRENT_LIST_DIR}/OpenGLShaders.cmake")
+if (FRAMEWORK_SOURCE STREQUAL "OpenGL" OR FRAMEWORK_SOURCE STREQUAL "D3D11")
+    include("${CMAKE_CURRENT_LIST_DIR}/EmbeddedShaders.cmake")
 endif ()
 
 if (IOS)
