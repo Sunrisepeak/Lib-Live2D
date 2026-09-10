@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Live2D Preview
+Exec=example_live2d
+Icon=example_live2d
+Categories=Utility;
+Terminal=false

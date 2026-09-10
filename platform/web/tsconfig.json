@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "moduleResolution": "node",
+    "skipLibCheck": true,
+    "noEmit": true,
+    "baseUrl": "../..",
+    "paths": { "@cubism/*": [".cache/cubism/CubismSdkForWeb-5-r.5/Framework/src/*"] }
+  },
+  "files": ["bridge.ts", "../../.cache/cubism/CubismSdkForWeb-5-r.5/Core/live2dcubismcore.d.ts"]
+}
