@@ -59,6 +59,26 @@ Use the bottom toolbar to switch characters, pause playback, or trigger an inter
 
 The preview follows the system language, with English as the fallback and Simplified Chinese and Japanese translations. Interface text lives in `examples/preview/resources/strings/default.properties`, `zh.properties`, and `ja.properties`, accessed through the generated `app::strings` identifiers. Add a locale catalog with the same keys to provide another translation. Language changes preserve the loaded character and playback state. The window title stays `Live2D`; model identifiers and SDK diagnostic details retain their original text.
 
+## Build with mcpp
+
+Short version: [`mcpp/README.md`](mcpp/README.md).
+
+The library is also an [mcpp](https://github.com/mcpp-community/mcpp) package, beside the CMake build and without changing it: `mcpp.toml` and `build.mcpp` describe the same sources and the same six platforms, and `mcpp/cubism/` compiles the Cubism SDK for Native from the `xim:cubism-sdk-native` payload. Nothing is fetched by hand — the Cubism SDKs, esbuild for the Web bridge, GLEW for Linux, the NDK, emsdk and the JDK are all payloads mcpp installs on first use — and the shaders reach the packaged application through the library's own build program: the 477 Metal shader libraries under `FrameworkMetallibs/`, the WebGL shaders under `live2d-shaders/`, the GLSL and HLSL embedded in the library.
+
+```sh
+mcpp build                                   # the library, for this machine
+cd examples/preview
+mcpp run                                     # the preview, on this machine
+mcpp pack --format appimage                  # Linux;   --format msi on Windows, --format app on macOS
+mcpp pack --target wasm32-emscripten --format web
+mcpp run  --target aarch64-ios-sim --format app
+mcpp run  --target x86_64-linux-android --format apk
+```
+
+An application adds the library with one line in its `mcpp.toml` — `huxerui.live2d = { git = "https://github.com/HuxerUI/Lib-Live2D.git", tag = "v0.1.0" }` — and imports it with `import huxerui.live2d;` or the header. There is no `live2d_configure_app()`, no SDK path to set and no `npm install`: the shaders are deployed by the library and every `mcpp pack --format` carries them.
+
+What stays with the CMake build for now: the library's own string catalogue (`resources/strings`), which is not merged into an application's resource package under mcpp; and runnable macOS and iOS bundles, because mcpp 2026.9.13.1 does not stage a Mach-O program (it would have to run it to find its dynamic closure), so `mcpp pack --format app` bundles the bare executable without the deployed shader libraries and resources. On Windows the Cubism D3D11 renderer is compiled from a copy adjusted for clang (`mcpp/cubism/build.mcpp` says how).
+
 ## Add the library to your application
 
 In your application's CMake file, after creating `my_app`:
