@@ -17,19 +17,30 @@ This is an early implementation. The preview includes three official sample char
 | Windows | D3D11 | Implemented; build and runtime checks pending |
 | Linux x86_64 | OpenGL / GDK | Implemented; build and runtime checks pending |
 
-See [validation records](tests/README.md) for exact coverage. Older Apple OS compatibility is not established for the pinned Core binaries; see [SDK compatibility](docs/cubism-sdk.md#toolchains-and-compatibility).
+Two build chains cover the same six platforms: CMake through the HuxerUI CLI, and [mcpp](https://github.com/mcpp-community/mcpp) from one manifest (its CI builds, smoke-runs and packs the preview on every row). See [validation records](tests/README.md) for exact coverage. Older Apple OS compatibility is not established for the pinned Core binaries; see [SDK compatibility](docs/cubism-sdk.md#toolchains-and-compatibility).
 
 ## Requirements
+
+A model package you have permission to use, including its `.model3.json` and every referenced dependency. The rest depends on the build chain.
+
+### With headers and CMake
 
 - HuxerUI SDK and CLI, tested with version 0.3.0.
 - A C++20 toolchain, CMake, and the platform tools required by HuxerUI.
 - Python 3 for downloading the pinned Cubism SDKs.
 - Cubism Native and/or Web 5 R5 (`5-r.5`).
-- A model package you have permission to use, including its `.model3.json` and every referenced dependency.
 
 Android builds use JDK 17. Apple builds require Xcode with the Metal compiler. Linux integration requires GTK 4.6+ and GLEW. Web builds also require Node.js, npm, Emscripten, and browser support for `VideoFrame`.
 
+### With C++20/23 modules and mcpp
+
+mcpp (`xlings install mcpp -y --use`). The Cubism SDKs, GLEW, esbuild, the NDK, emsdk and the JDK are payloads mcpp installs on first use; iOS additionally needs Xcode on a Mac.
+
 ## Try the preview
+
+The preview includes Mao, Haru, and Hiyori under `examples/preview/resources/raw/`. Use the bottom toolbar to switch characters, pause playback, or trigger an interaction; the adjustment panel exposes the selected model's motions and expressions.
+
+### With headers and CMake
 
 From this repository's root, download the dependencies:
 
@@ -37,7 +48,7 @@ From this repository's root, download the dependencies:
 python3 tools/fetch_cubism.py
 ```
 
-The script verifies pinned archive hashes and extracts both SDKs into `.cache/cubism`. The preview already includes Mao, Haru, and Hiyori under `examples/preview/resources/raw/`; builds package these local files directly and do not copy models from the SDK cache.
+The script verifies pinned archive hashes and extracts both SDKs into `.cache/cubism`; builds package the models under `examples/preview/resources/raw/` directly and do not copy them from the SDK cache.
 
 Build or run the preview with HuxerUI:
 
@@ -55,11 +66,27 @@ npm install --prefix .cache/web-tools --no-audit --no-fund esbuild@0.25.12 types
 huxerui run web
 ```
 
-Use the bottom toolbar to switch characters, pause playback, or trigger an interaction. The adjustment panel exposes the selected model's motions and expressions. Controls adapt to narrow and wide windows.
+Controls adapt to narrow and wide windows.
 
 The preview follows the system language, with English as the fallback and Simplified Chinese and Japanese translations. Interface text lives in `examples/preview/resources/strings/default.properties`, `zh.properties`, and `ja.properties`, accessed through the generated `app::strings` identifiers. Add a locale catalog with the same keys to provide another translation. Language changes preserve the loaded character and playback state. The window title stays `Live2D`; model identifiers and SDK diagnostic details retain their original text.
 
+### With C++20/23 modules and mcpp
+
+From `examples/preview/`:
+
+```sh
+mcpp run                                          # this machine
+mcpp pack --format appimage                       # Linux; --format msi on Windows, --format app on macOS
+mcpp pack --target wasm32-emscripten --format web # a static directory
+mcpp run  --target x86_64-linux-android --format apk   # an emulator or a device, through adb-run
+mcpp run  --target aarch64-ios-sim --format app        # a booted simulator, through simctl-run
+```
+
+Two things stay with the CMake build for now: the preview's own string catalogue (`resources/strings`), and runnable macOS/iOS bundles (mcpp 2026.9.13.1 does not stage Mach-O programs, so `--format app` carries the executable only). [`mcpp/README.md`](mcpp/README.md) says how the package is put together.
+
 ## Add the library to your application
+
+### With headers and CMake
 
 In your application's CMake file, after creating `my_app`:
 
@@ -90,6 +117,23 @@ Shader deployment depends on the platform:
 
 The [preview CMake configuration](examples/preview/CMakeLists.txt) and [iOS project](examples/preview/platform/ios) show the complete packaging setup.
 
+### With C++20/23 modules and mcpp
+
+One line in `mcpp.toml` and one import:
+
+```toml
+[dependencies]
+huxerui.live2d = { git = "https://github.com/HuxerUI/Lib-Live2D.git", tag = "<a release that carries mcpp.toml>" }
+# exactly one of tag / rev / branch: tag for a release, rev for one commit, branch to follow it
+```
+
+```cpp
+import huxerui;
+import huxerui.live2d;
+```
+
+No `live2d_configure_app()`, no SDK path, no `npm install`: the Cubism SDKs are payloads, and the shaders (the Metal libraries, the WebGL shaders, the embedded GLSL/HLSL) are deployed by the library into every `mcpp pack --format`.
+
 ## Load and display a model
 
 For a model already available in the application's local file system, pass its manifest as a `File` from a loading task:
@@ -113,7 +157,9 @@ resources/raw/Character/
 
 Use the actual names from your model's manifest. Also package and map every referenced motion, expression, physics, pose, display-info, and user-data file. Model textures must remain raw files; the Native backend decodes PNG textures.
 
-The following component assumes your generated application's resource namespace is `app` and the package uses the three paths above. Include HuxerUI's generated `app_resources.h` and pass its typed `app::raw` identifiers directly to `UseRawResource`. Add the component to a source file included in your HuxerUI application target, extend `resources` using the actual identifiers in the generated header, and call `CharacterView()` from your application's view tree. The map keys remain the package-relative paths requested by Live2D; they are distinct from the generated C++ identifiers.
+The following component assumes your generated application's resource namespace is `app` and the package uses the three paths above. The typed `app::raw` identifiers for the files come from HuxerUI's resource compiler and are passed directly to `UseRawResource`; the map keys remain the package-relative paths requested by Live2D and are distinct from the generated C++ identifiers. Extend `resources` with the actual identifiers, and call `CharacterView()` from your application's view tree.
+
+Add the component to a source file of your application target and include HuxerUI's generated `app_resources.h`:
 
 ```cpp
 #include <huxerui/huxerui.h>
@@ -197,6 +243,21 @@ The `RawResource` overload accepts an `OpenResourceAsync` callback. It receives 
 
 For model switching, retry handling, and a complete application, see the [preview source](examples/preview/src/app.cpp). It references `app::raw` identifiers from HuxerUI's automatically generated `app_resources.h`; no separate model resource header is required.
 
+### With C++20/23 modules and mcpp
+
+The same component is a module unit with no `#include`: the identifiers arrive through `import app.resources;`, the module hrc writes from the same list as the header, and the body is unchanged.
+
+```cpp
+export module app;
+
+import std;
+import huxerui;
+import huxerui.live2d;
+import app.resources;
+```
+
+`huxerui create app <name> --build mcpp --template live2d` renders a complete application in this form.
+
 ## Control playback
 
 Retain a controller across recompositions and attach it to one `ModelView`. Reuse a loaded `ModelAsset` with separate controllers to display independent instances. Omitting the controller gives the view a stable internal controller.
@@ -246,7 +307,8 @@ A failed backend can be retried by remounting the model. Automatic device-loss r
 - [SDK setup and compatibility](docs/cubism-sdk.md)
 - [Architecture and implementation limits](docs/live2d-design.md)
 - [Tests and validation records](tests/README.md)
-- [Public API](include/huxerui/live2d.h)
+- [Public API](include/huxerui/live2d.h), also `import huxerui.live2d;`
+- [The mcpp package](mcpp/README.md): layout, `mcpp/cubism/`, what is not on mcpp yet
 
 ## License
 

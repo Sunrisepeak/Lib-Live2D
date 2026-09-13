@@ -1,0 +1,114 @@
+# Lib-Live2D as an mcpp package.
+#
+# Additive: the CMake build reads none of this, and deleting it plus
+# `build.mcpp`, `mcpp/` and `src/live2d.cppm` returns the repository to a
+# CMake-only project. The two build systems describe the same library; the
+# platform sections below mirror CMakeLists.txt's per-platform globs and
+# cmake/Cubism.cmake's link lines.
+#
+# c++23 is a workaround: mcpp's clang-on-Windows path refuses `import std;`
+# below it (mcpp-community/mcpp#603); one standard per module graph.
+[package]
+name        = "live2d"
+namespace   = "huxerui"
+version     = "0.1.0"
+standard    = "c++23"
+description = "Live2D Cubism models as HuxerUI views"
+license     = "MIT"
+repo        = "https://github.com/HuxerUI/Lib-Live2D"
+platforms   = ["linux", "windows", "macos", "ios", "android", "emscripten"]
+
+# The framework at the revision this library was built against; a published
+# `huxerui.huxerui = "0.3"` replaces the table once that version carries the
+# six-row mcpp build.
+[dependencies]
+huxerui.huxerui = { git = "https://github.com/Sunrisepeak/HuxerUI.git", rev = "7857af857cac6ae4e28753039db982365af23fe9" }
+
+# The compiled Cubism SDK -- its Framework sources, its prebuilt Core and, on
+# macOS and iOS, its Metal shader libraries -- is a package of its own because
+# the Framework's Objective-C++ is written without ARC while this library's
+# is written with it, and a package has one flag set. The Web row has no
+# native Cubism: the TypeScript Framework is bundled by build.mcpp instead.
+[target.'cfg(not(os = "emscripten"))'.dependencies]
+huxerui.live2d-cubism = { path = "mcpp/cubism" }
+
+[targets.live2d]
+# `lib`, not `shared`: whether this library is a separate file at run time is
+# the consuming program's decision (`[build] dependency_linkage`).
+kind = "lib"
+
+# The module a consumer imports: `import huxerui.live2d;` names the same
+# entities `#include <huxerui/live2d.h>` does. Outside `src/` because `src/`
+# is private implementation and this file is API, as HuxerUI's modules/ is.
+[lib]
+path = "modules/live2d.cppm"
+
+[build]
+# huxerui.rules owns the source selection (build.mcpp): a build program can ADD
+# a source but cannot replace one, and src/model_view.cpp carries a composable
+# that hcg transforms.
+sources                 = []
+include_dirs            = ["include", "src"]
+private_include_dirs    = ["src"]
+macos_deployment_target = "12.0"
+ios_deployment_target   = "15.0"
+
+# A library states the exception model it needs on the Web; the application
+# that links it is the root that sets it.
+[target.'cfg(os = "emscripten")']
+requires_abi = { exceptions = true }
+
+# ---------------------------------------------------------------- Linux ----
+# The GL surface includes GTK headers; build.mcpp asks huxerui.rules for the
+# same include directories the framework compiled against. GLEW's header is
+# declared below; the compiled glew.c and libGL are the Cubism package's.
+[target.'cfg(all(linux, not(env = "android")))'.build]
+sources = ["platform/linux/src/*.cpp"]
+defines = ["CSM_TARGET_LINUX_GL", "GLEW_STATIC", "GLEW_NO_GLU"]
+
+# -------------------------------------------------------------- Windows ----
+[target.windows.build]
+sources = ["platform/windows/src/*.cpp"]
+[target.windows.runtime]
+libraries = ["d3d11", "d3dcompiler", "dxgi"]
+
+# ---------------------------------------------------------------- macOS ----
+[target.macos.build]
+sources  = ["platform/macos/src/*.mm"]
+cxxflags = ["-fobjc-arc"]
+
+# ------------------------------------------------------------------ iOS ----
+[target.'cfg(os = "ios")'.build]
+sources  = ["platform/ios/src/*.mm"]
+cxxflags = ["-fobjc-arc"]
+
+# Rendered only for Mach-O, so this is the macOS and iOS link in one place.
+[runtime]
+frameworks = ["Metal", "MetalKit", "Foundation"]
+
+# -------------------------------------------------------------- Android ----
+[target.'cfg(env = "android")'.build]
+sources = ["platform/android/src/main/cpp/*.cpp"]
+defines = ["CSM_TARGET_ANDROID_ES2"]
+[target.'cfg(env = "android")'.runtime]
+libraries = ["GLESv2", "EGL", "log"]
+
+# ------------------------------------------------------------------ Web ----
+[target.'cfg(os = "emscripten")'.build]
+sources = ["platform/web/src/*.cpp"]
+
+# THE SDKs COME FROM XLINGS. `xim:cubism-sdk-native` is the archive
+# tools/fetch_cubism.py downloads, installed once by mcpp; its header
+# directories are what this package's own translation units need (the
+# compiled Framework is mcpp/cubism's). On the Web, the TypeScript Framework
+# and the Core script, plus esbuild to bundle platform/web/bridge.ts -- the
+# `npm install --prefix .cache/web-tools` step of the CMake path.
+[target.'cfg(not(os = "emscripten"))'.xlings.workspace]
+"xim:cubism-sdk-native" = "5-r.5"
+# GLEW's header, included by the Cubism OpenGL renderer's; the compiled
+# glew.c and libGL are mcpp/cubism's.
+[target.'cfg(all(linux, not(env = "android")))'.xlings.workspace]
+"xim:glew" = "2.2.0"
+[target.'cfg(os = "emscripten")'.xlings.workspace]
+"xim:cubism-sdk-web" = "5-r.5"
+"xim:esbuild"        = "0.25.12"
