@@ -1,0 +1,222 @@
+// The Cubism SDK for Native as a build program: what cmake/Cubism.cmake,
+// the SDK's own Framework/CMakeLists.txt and cmake/MetalShaders.cmake do,
+// with the payload where the fetched `.cache/cubism` tree used to be.
+
+import std;
+import mcpp;
+
+namespace {
+
+std::string payload(const char* name) {
+    const std::string dir = mcpp::xpkg_dir("xim", name);
+    if (dir.empty()) {
+        std::cerr << "live2d-cubism: xim:" << name << " did not resolve -- it is "
+                     "declared in mcpp/cubism/mcpp.toml and installed by mcpp on first use\n";
+    }
+    return dir;
+}
+
+bool is_file(const std::filesystem::path& p) {
+    std::error_code ec;
+    return std::filesystem::is_regular_file(p, ec);
+}
+
+// The Framework's sources for one renderer: everything under Framework/src
+// except the Rendering/ back ends, plus the back end the row uses -- the
+// SDK's CMakeLists.txt with FRAMEWORK_SOURCE set. Metal is Objective-C++.
+void framework_sources(const std::filesystem::path& src, std::string_view backend,
+                       std::string_view skip = {}) {
+    std::vector<std::string> files;
+    std::error_code ec;
+    for (auto it = std::filesystem::recursive_directory_iterator(src, ec);
+         it != std::filesystem::recursive_directory_iterator(); ++it) {
+        if (!it->is_regular_file(ec)) continue;
+        const std::filesystem::path rel = std::filesystem::relative(it->path(), src, ec);
+        const std::string ext = it->path().extension().string();
+        if (ext != ".cpp" && ext != ".mm") continue;
+        const auto first = rel.begin();
+        const bool rendering = first != rel.end() && *first == "Rendering";
+        if (rendering) {
+            auto second = std::next(first);
+            const bool top = std::next(second) == rel.end();          // Rendering/x.cpp
+            const bool ours = !top && *second == backend
+                              && std::next(second, 2) == rel.end();  // Rendering/<backend>/x
+            if (!top && !ours) continue;
+        }
+        if (!skip.empty() && it->path().filename() == skip) continue;
+        files.push_back(it->path().string());
+    }
+    std::ranges::sort(files);
+    for (const std::string& f : files) mcpp::source(f.c_str());
+}
+
+// THE D3D11 RENDERER IS WRITTEN FOR MSVC'S `__m128`, AND THIS ROW IS CLANG.
+// CubismRenderer_D3D11.cpp reads `XMVECTOR::m128_f32[i]`, the members of
+// MSVC's `__m128` union; clang's `__m128` is a vector type with no members,
+// so sixteen lines fail to compile. A vector type subscripts (`v[i]`), and
+// that is the whole rewrite: the file is copied into the build directory
+// with `.m128_f32[` spelled `[`, and the copy is compiled instead. The CMake
+// build compiles the original with cl.exe and is untouched; the copy is
+// a build product, never written back into the payload.
+bool d3d11_renderer_for_clang(const std::filesystem::path& src) {
+    const std::filesystem::path original = src / "Rendering/D3D11/CubismRenderer_D3D11.cpp";
+    std::ifstream in(original, std::ios::binary);
+    if (!in) {
+        std::cerr << "live2d-cubism: cannot read " << original.string() << "\n";
+        return false;
+    }
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    for (std::size_t at = text.find(".m128_f32["); at != std::string::npos; at = text.find(".m128_f32[", at))
+        text.replace(at, std::string(".m128_f32[").size(), "[");
+    const std::filesystem::path out = std::filesystem::path(mcpp::out_dir()) / "clang" / "CubismRenderer_D3D11.cpp";
+    std::error_code ec;
+    std::filesystem::create_directories(out.parent_path(), ec);
+    std::ofstream file(out, std::ios::binary | std::ios::trunc);
+    if (!(file << text)) {
+        std::cerr << "live2d-cubism: cannot write " << out.string() << "\n";
+        return false;
+    }
+    mcpp::rerun_if_changed(original.string().c_str());
+    // The copy's own relative #includes resolve against the original's directory.
+    mcpp::include_dir((src / "Rendering/D3D11").string().c_str());
+    mcpp::source(out.string().c_str());
+    return true;
+}
+
+// The Core slice for this row, exactly cmake/Cubism.cmake's table.
+std::string core_slice(const std::string& lib, const std::string& os, const std::string& arch,
+                       const std::string& env, bool simulator) {
+    const std::string apple_arch = arch == "aarch64" ? "arm64" : arch;
+    if (env == "android") {
+        const std::string abi = arch == "aarch64" ? "arm64-v8a" : arch;
+        return lib + "/android/" + abi + "/libLive2DCubismCore.a";
+    }
+    if (os == "ios") {
+        return simulator ? lib + "/ios/Release-iphonesimulator-" + apple_arch + "/libLive2DCubismCore.a"
+                         : lib + "/ios/Release-iphoneos/libLive2DCubismCore.a";
+    }
+    if (os == "macos")   return lib + "/macos/" + apple_arch + "/libLive2DCubismCore.a";
+    if (os == "windows") return lib + "/windows/" + arch + "/143/Live2DCubismCore_MD.lib";
+    return lib + "/linux/" + arch + "/libLive2DCubismCore.a";
+}
+
+// Every Metal shader library the Framework loads by name at run time:
+// three plain ones and, for each of six blend fragment shaders, every colour
+// and alpha blend mode but the (Normal, Over) pair the plain one already is.
+// Each is one edge -- `xcrun metal` then `xcrun metallib` -- whose output is
+// deployed under FrameworkMetallibs/, the directory CubismShader_Metal names.
+bool metal_shaders(const std::filesystem::path& shaders, const std::string& sdk_name) {
+    static constexpr std::string_view colours[] = {
+        "Normal", "Add", "AddGlow", "Darken", "Multiply", "ColorBurn", "LinearBurn", "Lighten",
+        "Screen", "ColorDodge", "Overlay", "SoftLight", "HardLight", "LinearLight", "Hue", "Color" };
+    static constexpr std::string_view alphas[] = { "Over", "Atop", "Out", "ConjointOver", "DisjointOver" };
+    static constexpr std::string_view plain[] = { "MetalShaders", "VertShaderSrcBlend", "VertShaderSrcMaskedBlend" };
+    static constexpr std::string_view blended[] = {
+        "FragShaderSrcBlend", "FragShaderSrcMaskBlend", "FragShaderSrcMaskInvertedBlend",
+        "FragShaderSrcMaskInvertedPremultipliedAlphaBlend", "FragShaderSrcMaskPremultipliedAlphaBlend",
+        "FragShaderSrcPremultipliedAlphaBlend" };
+
+    const std::filesystem::path out = std::filesystem::path(mcpp::out_dir()) / "FrameworkMetallibs";
+    std::error_code ec;
+    std::filesystem::create_directories(out, ec);
+    std::vector<std::string> headers;
+    for (const auto& entry : std::filesystem::directory_iterator(shaders, ec)) {
+        if (entry.path().extension() == ".h" || entry.path().extension() == ".metal")
+            headers.push_back(entry.path().string());
+    }
+    std::ranges::sort(headers);
+
+    const auto compile = [&](std::string_view name, const std::string& output, int colour, int alpha) -> bool {
+        const std::string input   = (shaders / (std::string(name) + ".metal")).string();
+        const std::string air     = (out / (output + ".air")).string();
+        const std::string library = (out / (output + ".metallib")).string();
+        if (!is_file(input)) {
+            std::cerr << "live2d-cubism: no Metal shader " << input << "\n";
+            return false;
+        }
+        std::string defines;
+        if (colour >= 0) {
+            defines = " -D CSM_COLOR_BLEND_MODE=" + std::to_string(colour)
+                    + " -D CSM_ALPHA_BLEND_MODE=" + std::to_string(alpha);
+        }
+        const std::string script = "xcrun -sdk " + sdk_name + " metal" + defines + " -c '" + input + "' -o '" + air + "'"
+                                   " && xcrun -sdk " + sdk_name + " metallib '" + air + "' -o '" + library + "'";
+        const std::string id = "cubism.metal:" + output;
+        mcpp::action a;
+        a.id          = id.c_str();
+        a.role        = "source";
+        a.description = "METALLIB";
+        a.arg("sh").arg("-c").arg(script.c_str());
+        for (const std::string& h : headers) a.input(h.c_str());
+        a.output(library.c_str());
+        a.submit();
+        mcpp::deploy(library.c_str(), "FrameworkMetallibs");
+        return true;
+    };
+
+    for (std::string_view name : plain) {
+        if (!compile(name, std::string(name), -1, -1)) return false;
+    }
+    for (std::string_view name : blended) {
+        for (int colour = 0; colour < 16; ++colour) {
+            for (int alpha = 0; alpha < 5; ++alpha) {
+                if (colour == 0 && alpha == 0) continue;
+                const std::string output = std::string(name) + std::string(colours[colour]) + std::string(alphas[alpha]);
+                if (!compile(name, output, colour, alpha)) return false;
+            }
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+int main() {
+    const std::string os   = mcpp::target_os();
+    const std::string arch = mcpp::target_arch();
+    const std::string env  = mcpp::target_env();
+    if (os == "emscripten") return 0;   // the Web row bundles the TypeScript Framework instead
+
+    const std::string sdk = payload("cubism-sdk-native");
+    if (sdk.empty()) return 1;
+    mcpp::include_dir((sdk + "/Framework/src").c_str());
+    mcpp::include_dir((sdk + "/Core/include").c_str());
+
+    const bool apple = os == "macos" || os == "ios";
+    const std::string backend = apple ? "Metal" : os == "windows" ? "D3D11" : "OpenGL";
+    framework_sources(std::filesystem::path(sdk) / "Framework/src", backend,
+                      os == "windows" ? "CubismRenderer_D3D11.cpp" : "");
+    if (os == "windows" && !d3d11_renderer_for_clang(std::filesystem::path(sdk) / "Framework/src")) return 1;
+
+    const bool simulator = std::string_view(mcpp::target()).ends_with("-sim");
+    const std::string core = core_slice(sdk + "/Core/lib", os, arch, env, simulator);
+    if (!is_file(core)) {
+        std::cerr << "live2d-cubism: Cubism 5 R5 does not provide the selected Core slice: " << core << "\n";
+        return 1;
+    }
+    mcpp::link_search(std::filesystem::path(core).parent_path().string().c_str());
+    mcpp::link_lib(os == "windows" ? "Live2DCubismCore_MD" : "Live2DCubismCore");
+
+    if (os == "linux" && env != "android") {
+        // GLEW compiled in, and the libraries its GLX half and the renderer
+        // call. The headers are the payloads' own include directories.
+        const std::string glew = payload("glew"), gl = payload("libglvnd");
+        const std::string x11 = payload("libX11"), proto = payload("xorgproto");
+        if (glew.empty() || gl.empty() || x11.empty() || proto.empty()) return 1;
+        mcpp::include_dir((glew + "/include").c_str());
+        mcpp::include_dir((gl + "/include").c_str());
+        mcpp::include_dir((x11 + "/include").c_str());
+        mcpp::include_dir((proto + "/include").c_str());
+        mcpp::source((glew + "/src/glew.c").c_str());
+        mcpp::link_search((gl + "/lib").c_str());
+        mcpp::link_lib("GL");
+        mcpp::link_search((x11 + "/lib").c_str());
+        mcpp::link_lib("X11");
+    }
+
+    if (apple) {
+        const std::string sdk_name = os == "macos" ? "macosx" : simulator ? "iphonesimulator" : "iphoneos";
+        if (!metal_shaders(std::filesystem::path(sdk) / "Framework/src/Rendering/Metal/Shaders", sdk_name)) return 1;
+    }
+    return 0;
+}
