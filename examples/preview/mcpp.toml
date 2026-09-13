@@ -11,7 +11,7 @@ platforms   = ["linux", "windows", "macos", "ios", "android", "emscripten"]
 # Both, because the application imports both: a dependency's dependency is
 # not importable.
 [dependencies]
-huxerui.huxerui = { git = "https://github.com/Sunrisepeak/HuxerUI.git", rev = "a58d9d9f0b4ddc2381c4d3189dd1b17179e0bae1" }
+huxerui.huxerui = { git = "https://github.com/Sunrisepeak/HuxerUI.git", rev = "4130a233746ef3d2fc29cbe6d89c4b4d2884c891" }
 huxerui.live2d  = { path = "../.." }
 
 [targets.live2d_preview]

@@ -22,7 +22,7 @@ platforms   = ["linux", "windows", "macos", "ios", "android", "emscripten"]
 # `huxerui.huxerui = "0.3"` replaces the table once that version carries the
 # six-row mcpp build.
 [dependencies]
-huxerui.huxerui = { git = "https://github.com/Sunrisepeak/HuxerUI.git", rev = "a58d9d9f0b4ddc2381c4d3189dd1b17179e0bae1" }
+huxerui.huxerui = { git = "https://github.com/Sunrisepeak/HuxerUI.git", rev = "4130a233746ef3d2fc29cbe6d89c4b4d2884c891" }
 
 # The compiled Cubism SDK -- its Framework sources, its prebuilt Core and, on
 # macOS and iOS, its Metal shader libraries -- is a package of its own because
