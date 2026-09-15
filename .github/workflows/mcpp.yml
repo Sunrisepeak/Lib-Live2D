@@ -1,0 +1,384 @@
+# The mcpp build of Lib-Live2D: the library and its preview application on
+# every row the manifest declares, packed the way a user would install them.
+# The CMake build is not exercised here; it has no workflow in this
+# repository and this one does not add one for it.
+name: mcpp Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: mcpp-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MCPP_VERSION: '2026.9.15.2'
+  # The installer prompts on /dev/tty otherwise, which a runner has none of.
+  XLINGS_NON_INTERACTIVE: '1'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  linux:
+    name: mcpp build (linux x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Cache xlings and mcpp
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.xlings
+            ~/.mcpp
+          key: mcpp-${{ runner.os }}-${{ runner.arch }}-v1-${{ env.MCPP_VERSION }}-${{ hashFiles('mcpp.toml', 'mcpp/cubism/mcpp.toml') }}
+          restore-keys: |
+            mcpp-${{ runner.os }}-${{ runner.arch }}-v1-${{ env.MCPP_VERSION }}-
+            mcpp-${{ runner.os }}-${{ runner.arch }}-v1-
+
+      - name: Install xlings and mcpp
+        run: |
+          if [ ! -x "$HOME/.xlings/bin/xlings" ]; then
+            curl -fsSL https://d2learn.org/xlings-install.sh | bash
+          fi
+          echo "$HOME/.xlings/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+
+      - name: Select the pinned mcpp
+        run: |
+          xlings install "mcpp@${MCPP_VERSION}" -y --use
+          mcpp --version | tee version.txt
+          grep -q "${MCPP_VERSION}" version.txt || { echo "mcpp ${MCPP_VERSION} is not the active mcpp"; exit 1; }
+
+
+      - name: Build the library
+        run: mcpp build
+
+      - name: Build the preview
+        working-directory: examples/preview
+        run: mcpp build
+
+      - name: Assert the preview carries its resources
+        working-directory: examples/preview
+        run: |
+          exe=$(find target -type f -name live2d_preview -path '*/bin/*' | head -1)
+          test -n "$exe" || { echo "the preview produced no executable"; exit 1; }
+          res="$(dirname "$exe")/live2d_preview.resources"
+          test -f "$res/huxerui/resources.bin" || { echo "no resource index under $res"; exit 1; }
+          test -f "$res/huxerui/app/raw/Mao/Mao.model3.json" || { echo "the Mao model is not beside the executable"; exit 1; }
+          # The library's catalogue is in the preview's package, under its
+          # `package_product` namespace, as CMake merges it.
+          strings "$res/huxerui/resources.bin" > index.txt
+          grep -qx 'huxerui_live2d' index.txt || { echo "the library's namespace is not in the preview's package"; exit 1; }
+          grep -qx 'strings/library_name' index.txt || { echo "the library's string is not in the preview's package"; exit 1; }
+          echo "resources deployed: $(find "$res" -type f | wc -l) files"
+
+      - name: Pack the preview as an AppImage
+        working-directory: examples/preview
+        run: |
+          mcpp pack --format appimage
+          image=$(find target -name '*.AppImage' | head -1)
+          test -n "$image" || { echo "no AppImage was produced"; exit 1; }
+          test "$(stat -c %s "$image")" -gt 4194304 || { echo "the AppImage is implausibly small"; exit 1; }
+          echo "packed $image ($(stat -c %s "$image") bytes)"
+
+  web:
+    name: mcpp build (wasm32-emscripten)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Cache xlings and mcpp
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.xlings
+            ~/.mcpp
+          key: mcpp-web-${{ runner.os }}-${{ runner.arch }}-v1-${{ env.MCPP_VERSION }}-${{ hashFiles('mcpp.toml') }}
+          restore-keys: |
+            mcpp-web-${{ runner.os }}-${{ runner.arch }}-v1-${{ env.MCPP_VERSION }}-
+            mcpp-web-${{ runner.os }}-${{ runner.arch }}-v1-
+
+      - name: Install xlings and mcpp
+        run: |
+          if [ ! -x "$HOME/.xlings/bin/xlings" ]; then
+            curl -fsSL https://d2learn.org/xlings-install.sh | bash
+          fi
+          echo "$HOME/.xlings/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+
+      - name: Select the pinned mcpp
+        run: |
+          xlings install "mcpp@${MCPP_VERSION}" -y --use
+          mcpp --version | tee version.txt
+          grep -q "${MCPP_VERSION}" version.txt || { echo "mcpp ${MCPP_VERSION} is not the active mcpp"; exit 1; }
+
+
+      - name: Build the preview for the Web
+        working-directory: examples/preview
+        run: mcpp build --target wasm32-emscripten
+
+      - name: Pack the static directory and check its shape
+        working-directory: examples/preview
+        run: |
+          mcpp pack --target wasm32-emscripten --format web
+          web=$(find target -type d -name web -path '*out/web' | head -1)
+          test -n "$web" || { echo "dist-web produced no directory"; exit 1; }
+          for f in index.html live2d_preview.js live2d_preview.wasm live2d_preview.data; do
+            test -f "$web/$f" || { echo "the Web directory lacks $f"; exit 1; }
+          done
+          magic=$(head -c 4 "$web/live2d_preview.wasm" | od -An -tx1 | tr -d ' \n')
+          test "$magic" = "0061736d" || { echo "the .wasm is not a WebAssembly module (magic $magic)"; exit 1; }
+          grep -q 'CubismFramework' "$web/live2d_preview.js" || { echo "the launcher does not carry the bundled Cubism Web Framework"; exit 1; }
+          grep -q 'Live2DCubismCore' "$web/live2d_preview.js" || { echo "the launcher does not carry the Cubism Core script"; exit 1; }
+          test -d "$web/live2d-shaders" || { echo "the WebGL shaders were not deployed beside the page"; exit 1; }
+          test "$(ls "$web/live2d-shaders" | wc -l)" -ge 13 || { echo "live2d-shaders/ is incomplete"; exit 1; }
+          echo "web directory: $(ls "$web" | tr '\n' ' ')"
+
+  macos:
+    name: mcpp build (macos arm64)
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Cache xlings and mcpp
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.xlings
+            ~/.mcpp
+          key: mcpp-${{ runner.os }}-${{ runner.arch }}-v1-${{ env.MCPP_VERSION }}-${{ hashFiles('mcpp.toml', 'mcpp/cubism/mcpp.toml') }}
+          restore-keys: |
+            mcpp-${{ runner.os }}-${{ runner.arch }}-v1-${{ env.MCPP_VERSION }}-
+            mcpp-${{ runner.os }}-${{ runner.arch }}-v1-
+
+      - name: Install xlings and mcpp
+        run: |
+          if [ ! -x "$HOME/.xlings/bin/xlings" ]; then
+            curl -fsSL https://d2learn.org/xlings-install.sh | bash
+          fi
+          echo "$HOME/.xlings/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+
+      - name: Select the pinned mcpp
+        run: |
+          xlings install "mcpp@${MCPP_VERSION}" -y --use
+          mcpp --version | tee version.txt
+          grep -q "${MCPP_VERSION}" version.txt || { echo "mcpp ${MCPP_VERSION} is not the active mcpp"; exit 1; }
+
+      - name: Build the library
+        run: mcpp build
+
+      - name: Build the preview, and check the Metal shader libraries were compiled
+        working-directory: examples/preview
+        run: |
+          mcpp build
+          # Distinct names: each library exists as the action's output and again
+          # deployed beside the executable in the build tree.
+          libs=$(find target -name '*.metallib' -path '*FrameworkMetallibs*' -exec basename {} \; | sort -u | wc -l | tr -d ' ')
+          test "$libs" = "477" || { echo "expected 477 compiled Metal shader libraries, found $libs"; exit 1; }
+          echo "$libs metallibs compiled"
+
+      # The deployed directories land where a CMake bundle keeps them: the
+      # 477 Metal shader libraries under Contents/Resources/FrameworkMetallibs
+      # (Cubism's NSBundle lookup), HuxerUI's resources under
+      # Contents/Resources/HuxerUI -- mcpp 2026.9.13.2 stages the declared
+      # files, dist-apple 0.9.2 places them at the resource destination.
+      - name: Pack the bundle and check its layout
+        working-directory: examples/preview
+        run: |
+          mcpp pack --format app 2>&1 | tee pack.log
+          app=$(find target -type d -name '*.app' | head -1)
+          test -n "$app" || { echo "dist-apple produced no bundle"; exit 1; }
+          test -f "$app/Contents/MacOS/live2d_preview" || { echo "the bundle carries no executable"; exit 1; }
+          libs=$(find "$app/Contents/Resources/FrameworkMetallibs" -name '*.metallib' | wc -l | tr -d ' ')
+          test "$libs" = "477" || { echo "the bundle holds $libs metallibs under Contents/Resources/FrameworkMetallibs, not 477"; exit 1; }
+          test -f "$app/Contents/Resources/HuxerUI/huxerui/resources.bin" || { echo "the resource package is not under Contents/Resources/HuxerUI"; exit 1; }
+          echo "bundle: $app ($libs metallibs)"
+
+  ios-sim:
+    name: mcpp build (aarch64-ios-sim)
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Cache xlings and mcpp
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.xlings
+            ~/.mcpp
+          key: mcpp-ios-${{ runner.os }}-${{ runner.arch }}-v1-${{ env.MCPP_VERSION }}-${{ hashFiles('mcpp.toml', 'mcpp/cubism/mcpp.toml') }}
+          restore-keys: |
+            mcpp-ios-${{ runner.os }}-${{ runner.arch }}-v1-${{ env.MCPP_VERSION }}-
+            mcpp-ios-${{ runner.os }}-${{ runner.arch }}-v1-
+
+      - name: Install xlings and mcpp
+        run: |
+          if [ ! -x "$HOME/.xlings/bin/xlings" ]; then
+            curl -fsSL https://d2learn.org/xlings-install.sh | bash
+          fi
+          echo "$HOME/.xlings/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+
+      - name: Select the pinned mcpp
+        run: |
+          xlings install "mcpp@${MCPP_VERSION}" -y --use
+          mcpp --version | tee version.txt
+          grep -q "${MCPP_VERSION}" version.txt || { echo "mcpp ${MCPP_VERSION} is not the active mcpp"; exit 1; }
+
+      - name: Build the preview for the simulator
+        working-directory: examples/preview
+        run: mcpp build --target aarch64-ios-sim
+
+      # The flat bundle: the executable, the 477 Metal shader libraries under
+      # FrameworkMetallibs and the resource package under HuxerUI, at its root.
+      - name: Pack the bundle and check its shape
+        working-directory: examples/preview
+        run: |
+          mcpp pack --target aarch64-ios-sim --format app 2>&1 | tee pack.log
+          app=$(find target -type d -name '*.app' | head -1)
+          test -n "$app" || { echo "dist-apple produced no bundle"; exit 1; }
+          test -f "$app/live2d_preview" || { echo "the bundle carries no executable"; exit 1; }
+          libs=$(find target -name '*.metallib' -path '*FrameworkMetallibs*' -not -path '*.app/*' -exec basename {} \; | sort -u | wc -l | tr -d ' ')
+          test "$libs" = "477" || { echo "expected 477 compiled Metal shader libraries, found $libs"; exit 1; }
+          test -f "$app/FrameworkMetallibs/MetalShaders.metallib" || { echo "the Metal shader libraries are not at the bundle root"; exit 1; }
+          test -f "$app/HuxerUI/huxerui/resources.bin" || { echo "the resource package is not at the bundle root"; exit 1; }
+          echo "bundle: $app ($libs metallibs)"
+
+  android:
+    name: mcpp build (x86_64-linux-android)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Cache xlings and mcpp
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.xlings
+            ~/.mcpp
+          key: mcpp-android-${{ runner.os }}-${{ runner.arch }}-v1-${{ env.MCPP_VERSION }}-${{ hashFiles('mcpp.toml', 'mcpp/cubism/mcpp.toml') }}
+          restore-keys: |
+            mcpp-android-${{ runner.os }}-${{ runner.arch }}-v1-${{ env.MCPP_VERSION }}-
+            mcpp-android-${{ runner.os }}-${{ runner.arch }}-v1-
+
+      - name: Install xlings and mcpp
+        run: |
+          if [ ! -x "$HOME/.xlings/bin/xlings" ]; then
+            curl -fsSL https://d2learn.org/xlings-install.sh | bash
+          fi
+          echo "$HOME/.xlings/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+
+      - name: Select the pinned mcpp
+        run: |
+          xlings install "mcpp@${MCPP_VERSION}" -y --use
+          mcpp --version | tee version.txt
+          grep -q "${MCPP_VERSION}" version.txt || { echo "mcpp ${MCPP_VERSION} is not the active mcpp"; exit 1; }
+
+
+      - name: Build the preview for Android
+        working-directory: examples/preview
+        run: mcpp build --target x86_64-linux-android
+
+      - name: Pack the APK and check its contents
+        working-directory: examples/preview
+        run: |
+          mcpp pack --target x86_64-linux-android --format apk
+          apk=$(find target -name '*.apk' | grep -v base.apk | head -1)
+          test -n "$apk" || { echo "dist-apk produced no APK"; exit 1; }
+          unzip -Z1 "$apk" | tee contents.txt
+          for f in lib/x86_64/liblive2d_preview.so lib/x86_64/libhuxerui.so assets/huxerui/resources.bin assets/huxerui/app/raw/Mao/Mao.model3.json \
+                   classes.dex AndroidManifest.xml resources.arsc res/mipmap-anydpi-v26/ic_launcher.xml; do
+            grep -qx "$f" contents.txt || { echo "the APK lacks $f"; exit 1; }
+          done
+          # Signed as Gradle's variants are: a release package without a
+          # keystore is unsigned, and a debug one carries the debug key.
+          ! grep -qE '^META-INF/.*\.(RSA|EC)$' contents.txt || { echo "the release APK is signed without a keystore"; exit 1; }
+          mcpp pack --profile dev --target x86_64-linux-android --format apk 2>&1 | tee pack-dev.log
+          dev=$(sed -n 's/^ *Packed //p' pack-dev.log | tail -1)
+          unzip -Z1 "$dev" | grep -qE '^META-INF/.*\.(RSA|EC)$' || { echo "the debug APK is not signed"; exit 1; }
+          echo "apk: $apk (release, unsigned), $dev (debug, signed)"
+
+  windows:
+    name: mcpp build (windows x86_64)
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+
+      - name: Cache xlings and mcpp
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.xlings
+            ~/.mcpp
+          key: mcpp-${{ runner.os }}-${{ runner.arch }}-v1-${{ env.MCPP_VERSION }}-${{ hashFiles('mcpp.toml', 'mcpp/cubism/mcpp.toml') }}
+          restore-keys: |
+            mcpp-${{ runner.os }}-${{ runner.arch }}-v1-${{ env.MCPP_VERSION }}-
+            mcpp-${{ runner.os }}-${{ runner.arch }}-v1-
+
+      - name: Install xlings and mcpp
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "$HOME\.xlings")) {
+            irm https://d2learn.org/xlings-install.ps1.txt | iex
+          }
+          "$HOME\.xlings\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "$HOME\.xlings\subos\current\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Select the pinned mcpp
+        shell: pwsh
+        run: |
+          xlings install "mcpp@$env:MCPP_VERSION" -y --use
+          $version = (mcpp --version | Out-String)
+          Write-Host $version
+          if (-not $version.Contains($env:MCPP_VERSION)) { throw "mcpp $env:MCPP_VERSION is not the active mcpp" }
+
+      - name: Build the library
+        shell: pwsh
+        run: mcpp build
+
+      - name: Build the preview and its installer
+        shell: pwsh
+        working-directory: examples/preview
+        run: |
+          mcpp build
+          if ($LASTEXITCODE -ne 0) { throw 'the preview failed to build' }
+          mcpp pack --format msi
+          if ($LASTEXITCODE -ne 0) { throw 'the preview failed to pack' }
+          $msi = Get-ChildItem -Recurse -Filter '*.msi' target | Select-Object -First 1
+          if (-not $msi) { throw 'dist-wix produced no installer' }
+          Write-Host "built $($msi.FullName) ($([math]::Round($msi.Length/1KB)) KB)"
+          $installer = New-Object -ComObject WindowsInstaller.Installer
+          $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($msi.FullName, 0))
+          $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @('SELECT FileName, FileSize FROM File'))
+          $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+          $files = @()
+          while ($true) {
+            $row = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+            if (-not $row) { break }
+            $name = $row.GetType().InvokeMember('StringData', 'GetProperty', $null, $row, @(1))
+            $size = $row.GetType().InvokeMember('IntegerData', 'GetProperty', $null, $row, @(2))
+            $files += [pscustomobject]@{ Name = $name; Size = $size }
+          }
+          $files | ForEach-Object { Write-Host "  $($_.Name)  $($_.Size) bytes" }
+          if ($files.Count -eq 0) { throw 'the MSI carries no files' }
+          $exe = $files | Where-Object { $_.Name -like '*live2d_preview.exe*' }
+          if (-not $exe) { throw 'the MSI does not carry the preview executable' }
+          if ($exe.Size -lt 1MB) { throw "the installed executable is $($exe.Size) bytes, which is not the application" }

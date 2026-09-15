@@ -1,0 +1,49 @@
+# The Cubism SDK for Native, compiled: Live2D's Framework sources, its prebuilt
+# Core library and, on macOS and iOS, its Metal shader libraries.
+#
+# A package of its own, not part of `live2d`, for one reason: the Framework's
+# Objective-C++ is written for manual reference counting (`[obj release]`,
+# `autorelease`) while Lib-Live2D's platform code is written for ARC, and a
+# package has one flag set. cmake/Cubism.cmake keeps the same split as two
+# targets. build.mcpp does everything else: it walks the SDK payload for the
+# renderer the row uses, links the Core slice the row needs, and has
+# mcpp:plugins' rules-metal compile the 477 Metal shader libraries.
+[package]
+name        = "live2d-cubism"
+namespace   = "huxerui"
+version     = "5.5.0"
+standard    = "c++20"
+description = "Cubism SDK for Native, compiled for HuxerUI's Lib-Live2D"
+license     = "Live2D Open Software License"
+repo        = "https://github.com/HuxerUI/Lib-Live2D"
+platforms   = ["linux", "windows", "macos", "ios", "android"]
+
+[targets.live2d-cubism]
+kind = "lib"
+
+# The Metal shader libraries, compiled by the official rule (build.mcpp).
+[build-dependencies.mcpp]
+plugins = { version = "0.11.1", features = ["rules-metal"], host-module = true }
+
+[build]
+# Every source comes from the payload, selected by build.mcpp.
+sources                 = []
+macos_deployment_target = "12.0"
+ios_deployment_target   = "15.0"
+
+[target.'cfg(all(linux, not(env = "android")))'.build]
+defines = ["CSM_TARGET_LINUX_GL", "GLEW_STATIC", "GLEW_NO_GLU"]
+[target.'cfg(env = "android")'.build]
+defines = ["CSM_TARGET_ANDROID_ES2"]
+
+# THE SDK AND WHAT ITS LINUX RENDERER NEEDS. `xim:cubism-sdk-native` is the
+# archive tools/fetch_cubism.py downloads. GLEW is compiled in from its source
+# release (`src/glew.c`, as find_package(GLEW) would link), which needs the
+# GL and X11 headers its GLX half includes and libGL to link.
+[target.'cfg(not(os = "emscripten"))'.xlings.workspace]
+"xim:cubism-sdk-native" = "5-r.5"
+[target.'cfg(all(linux, not(env = "android")))'.xlings.workspace]
+"xim:glew"      = "2.2.0"
+"xim:libglvnd"  = "1.7.0.1"
+"xim:libX11"    = "1.8.10"
+"xim:xorgproto" = "2024.1"

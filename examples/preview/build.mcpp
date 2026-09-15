@@ -1,0 +1,21 @@
+// The whole build program. `huxerui.rules` arrives through the huxerui
+// dependency, which re-exports it, so this file names no package of its own;
+// the Cubism shaders reach the packaged application through the library's
+// own deploys. Compare CMakeLists.txt: huxerui_add_app, huxerui_use_library
+// and live2d_configure_app, in one call.
+
+import mcpp;
+import huxerui.rules;
+
+int main() {
+    return huxerui::rules::configure({
+        .target             = "live2d_preview",
+        .resources          = "resources",
+        .resource_namespace = "app",
+        // BUNDLE_NAME and BUNDLE_IDENTIFIER: the `.app` and the APK take them.
+        .bundle_name        = "Live2D Preview",
+        .bundle_identifier  = "org.huxerui.lib.live2d.preview",
+        .web                = { .title = "Live2D Preview" },
+        .android            = { .label = "Live2D Preview" },
+    }) ? 0 : 1;
+}
