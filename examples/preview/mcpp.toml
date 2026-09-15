@@ -1,0 +1,51 @@
+# The preview as an mcpp application: this file, build.mcpp and src/main.cpp
+# beside the CMake project, compiling the same src/app.cpp and resources/.
+# c++20; the macOS and iOS rows' C++ standard library (`llvm.libcxx`, below)
+# states the c++23 its own sources need (mcpp-community/mcpp#641, item 2).
+[package]
+name        = "live2d-preview"
+version     = "0.1.0"
+standard    = "c++20"
+description = "Live2D preview: the library's characters, motions and expressions"
+platforms   = ["linux", "windows", "macos", "ios", "android", "emscripten"]
+
+# Both, because the application imports both: a dependency's dependency is
+# not importable.
+[dependencies]
+huxerui.live2d  = { path = "../.." }
+huxerui.huxerui = { git = "https://github.com/Sunrisepeak/HuxerUI.git", rev = "ed896c904c6ef2bbd706aa6b9d535f29d20bcc26" }
+
+# The C++ standard library of the macOS and iOS rows, compiled for this
+# application's own floors: on macOS it keeps the 12.0 floor CMake builds for
+# (the toolchain's libc++ is built for 14.0), and on iOS it is the libc++ whose
+# objects match its headers.
+[target.'cfg(any(os = "macos", os = "ios"))'.dependencies]
+llvm.libcxx = "22.1.8.3"
+
+[targets.live2d_preview]
+# `app`: an executable on the desktop rows, a `.js` launcher on the Web, the
+# shared object the Java host loads on Android.
+kind = "app"
+main = "src/main.cpp"
+# No console window behind the application on Windows; inert elsewhere.
+windows_subsystem = "windows"
+
+[build]
+# The platform floors CMake builds for; the framework's version floors refuse a
+# lower one.
+macos_deployment_target = "12.0"
+ios_deployment_target   = "15.0"
+sources = []
+
+# The Web build's exception model; HuxerUI requires it, and only a root can
+# state it.
+[target.'cfg(os = "emscripten")'.abi]
+exceptions = true
+
+# The Android floor CMake builds for. `mcpp run --target <row> --format
+# apk|app` hands the package to the row's runner, which huxerui.rules and
+# dist-apple supply, so none is named here.
+[target.x86_64-linux-android]
+min_api_level = 23
+[target.aarch64-linux-android]
+min_api_level = 23

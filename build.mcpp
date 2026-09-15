@@ -1,0 +1,178 @@
+// Lib-Live2D's build program.
+//
+// Three jobs: the library's own sources and resources through huxerui.rules;
+// the Cubism SDK's headers, and the renderer's GLSL/HLSL embedded as string
+// literals (cmake/EmbeddedShaders.cmake); and on the Web, the TypeScript
+// bridge bundled by esbuild and the WebGL shaders deployed beside the page
+// (cmake/Web.cmake and tools/build_web.mjs). The compiled Framework, the
+// prebuilt Core and the Metal shader libraries are mcpp/cubism's.
+
+import std;
+import mcpp;
+import huxerui.rules;
+
+namespace {
+
+std::string payload(const char* name) {
+    const std::string dir = mcpp::xpkg_dir("xim", name);
+    if (dir.empty()) {
+        std::cerr << "live2d: xim:" << name << " did not resolve -- it is declared "
+                     "in mcpp.toml and installed by mcpp on first use\n";
+    }
+    return dir;
+}
+
+// Files directly under `dir` with one of the extensions, sorted.
+std::vector<std::filesystem::path> files_in(const std::filesystem::path& dir,
+                                            std::initializer_list<const char*> extensions) {
+    std::vector<std::filesystem::path> out;
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        if (!entry.is_regular_file(ec)) continue;
+        for (const char* ext : extensions) {
+            if (entry.path().extension() == ext) { out.push_back(entry.path()); break; }
+        }
+    }
+    std::ranges::sort(out);
+    return out;
+}
+
+std::string read_file(const std::filesystem::path& p) {
+    std::ifstream in(p, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+// Written only when the bytes differ: rewriting identical bytes moves the
+// mtime, and a moved mtime on an included header rebuilds every TU.
+bool write_if_different(const std::filesystem::path& path, const std::string& bytes) {
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    if (read_file(path) == bytes) return true;
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << bytes;
+    return static_cast<bool>(out);
+}
+
+// The shaders the OpenGL and D3D11 renderers compile at run time, embedded
+// under the names CubismShader_* asks the loader for. The Metal renderer
+// loads compiled libraries instead (mcpp/cubism).
+bool embedded_shaders(const std::string& sdk, const std::string& os, const std::string& env) {
+    const std::filesystem::path rendering = std::filesystem::path(sdk) / "Framework/src/Rendering";
+    std::vector<std::filesystem::path> files;
+    std::string prefix = "FrameworkShaders/";
+    if (os == "windows") {
+        files = { rendering / "D3D11/Shaders/CubismEffect.fx", rendering / "D3D11/Shaders/CubismBlendMode.fx" };
+    } else if (env == "android") {
+        files  = files_in(rendering / "OpenGL/Shaders/StandardES", { ".vert", ".frag" });
+        prefix = "";
+    } else if (os == "linux") {
+        files  = files_in(rendering / "OpenGL/Shaders/Standard", { ".vert", ".frag" });
+    } else {
+        return true;
+    }
+    if (files.empty()) {
+        std::cerr << "live2d: no Cubism shaders under " << rendering.string() << "\n";
+        return false;
+    }
+    std::string header =
+        "#pragma once\n#include <string_view>\nnamespace huxerui::live2d::detail {\n"
+        "struct EmbeddedShader { std::string_view path; std::string_view source; };\n"
+        "inline constexpr EmbeddedShader embedded_shaders[]{\n";
+    for (const std::filesystem::path& file : files) {
+        const std::string source = read_file(file);
+        if (source.empty()) {
+            std::cerr << "live2d: cannot read " << file.string() << "\n";
+            return false;
+        }
+        header += "{\"" + prefix + file.filename().string() + "\", R\"cubism_shader(" + source + ")cubism_shader\"},\n";
+        mcpp::rerun_if_changed(file.string().c_str());
+    }
+    header += "};\n}\n";
+    const std::filesystem::path out = std::filesystem::path(mcpp::out_dir()) / "live2d-generated";
+    if (!write_if_different(out / "embedded_shaders.h", header)) {
+        std::cerr << "live2d: cannot write " << (out / "embedded_shaders.h").string() << "\n";
+        return false;
+    }
+    mcpp::include_dir(out.string().c_str());
+    mcpp::define("LIVE2D_EMBEDDED_SHADERS");
+    return true;
+}
+
+// The Web: the TypeScript bridge bundled with the Cubism Web Framework into
+// one script the launcher runs before the module (`--extern-pre-js`), the
+// Core script before that, and the WebGL shaders the bundle loads from
+// `live2d-shaders/` deployed beside the page.
+bool web(const std::string& root) {
+    const std::string sdk     = payload("cubism-sdk-web");
+    const std::string esbuild = payload("esbuild");
+    if (sdk.empty() || esbuild.empty()) return false;
+
+    const std::string bridge = root + "/platform/web/bridge.ts";
+    const std::string bundle = std::string(mcpp::out_dir()) + "/live2d-web.js";
+    // `--alias` is what tsconfig.json's `paths` says with `.cache/cubism`
+    // replaced by the payload; esbuild applies it before the tsconfig.
+    const std::string cmd = "'" + esbuild + "/bin/esbuild' --bundle --format=iife --target=es2020"
+                            " '--alias:@cubism=" + sdk + "/Framework/src'"
+                            " --log-level=warning --outfile='" + bundle + "' '" + bridge + "'";
+    if (std::system(cmd.c_str()) != 0) {
+        std::cerr << "live2d: esbuild failed to bundle platform/web/bridge.ts\n";
+        return false;
+    }
+    mcpp::rerun_if_changed(bridge.c_str());
+    mcpp::rerun_if_changed((root + "/platform/web/tsconfig.json").c_str());
+
+    mcpp::link_flag(("--extern-pre-js=" + sdk + "/Core/live2dcubismcore.js").c_str());
+    mcpp::link_flag(("--extern-pre-js=" + bundle).c_str());
+
+    const auto shaders = files_in(std::filesystem::path(sdk) / "Framework/Shaders/WebGL", { ".vert", ".frag" });
+    if (shaders.empty()) {
+        std::cerr << "live2d: no WebGL shaders under " << sdk << "/Framework/Shaders/WebGL\n";
+        return false;
+    }
+    for (const std::filesystem::path& shader : shaders) {
+        mcpp::deploy(shader.string().c_str(), "live2d-shaders");
+    }
+    return true;
+}
+
+} // namespace
+
+int main() {
+    const std::string root = mcpp::manifest_dir();
+    const std::string os   = mcpp::target_os();
+    const std::string env  = mcpp::target_env();
+    const bool         web_row = os == "emscripten";
+
+    // The library's sources: CMakeLists.txt's src/ glob, minus src/native on
+    // the Web, plus the module interface. The platform directories are the
+    // manifest's target sections.
+    std::vector<std::string> sources;
+    huxerui::rules::detail::collect(root, "src/*.cpp", sources);
+    if (!web_row) huxerui::rules::detail::collect(root, "src/native/*.cpp", sources);
+    sources.push_back("modules/live2d.cppm");
+    mcpp::rerun_if_changed((root + "/modules/live2d.cppm").c_str());
+    // The library's catalogue (resources/strings) joins the package of every
+    // application that depends on it, under `huxerui_live2d`, as CMake merges
+    // `HuxerUI::Live2D`'s.
+    if (!huxerui::rules::configure({ .sources = sources, .resources = "resources" })) return 1;
+
+    if (web_row) return web(root) ? 0 : 1;
+
+    const std::string sdk = payload("cubism-sdk-native");
+    if (sdk.empty()) return 1;
+    mcpp::include_dir((sdk + "/Framework/src").c_str());
+    mcpp::include_dir((sdk + "/Core/include").c_str());
+    mcpp::include_dir((sdk + "/Samples/OpenGL/thirdParty/stb").c_str());
+    if (!embedded_shaders(sdk, os, env)) return 1;
+
+    // Linux: <gdk/gdk.h> in the GL surface, and GLEW's header through the
+    // Cubism renderer's. The framework's rule carries the GTK include
+    // directories; the Cubism package carries GLEW and libGL.
+    if (os == "linux" && env != "android") {
+        if (!huxerui::rules::linux_gtk(/*link=*/false)) return 1;
+        const std::string glew = payload("glew");
+        if (glew.empty()) return 1;
+        mcpp::include_dir((glew + "/include").c_str());
+    }
+    return 0;
+}
